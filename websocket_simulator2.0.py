@@ -8,6 +8,8 @@ import sys
 import os
 import ssl
 import glob
+import time
+import requests
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 from playwright.async_api import async_playwright
@@ -16,20 +18,26 @@ from playwright.async_api import async_playwright
 class SemiAutoLoginManager:
     """半自动登录管理器"""
     
-    async def semi_auto_login(self, headless: bool = False) -> Optional[Tuple[str, str]]:
+    async def semi_auto_login(self, headless: bool = False, keep_open: bool = False) -> Optional[Tuple[str, str, Optional[Dict]]]:
         """
         半自动登录 - 浏览器打开，用户手动登录，脚本自动提取
-        
+
         Args:
             headless: 是否无头模式（通常应为 False 以便用户操作）
-        
+            keep_open: 是否保持浏览器打开（用于Git提交模式）
+
         Returns:
-            (invoker_id, session_id) 或 None
+            (invoker_id, session_id, git_params) 或 None
+            git_params: 如果导航到仓库页面，包含 {project_id, repository_id, file_path}
         """
         print("\n🌐 正在启动浏览器...")
         print("📱 请在浏览器中完成登录（包括短信验证码）")
-        print("⚠️  登录成功后请不要关闭浏览器，脚本会自动提取凭证")
-        print("💡 登录后随便点击页面或刷新，触发网络请求\n")
+        if keep_open:
+            print("⚠️  登录后浏览器会保持打开")
+            print("💡 如需Git提交，请导航到仓库页面（如 https://www.srdcloud.cn/code/PROJECT_ID/repoView/REPO_ID/...）")
+        else:
+            print("⚠️  登录成功后请不要关闭浏览器，脚本会自动提取凭证")
+            print("💡 登录后随便点击页面或刷新，触发网络请求\n")
         
         try:
             async with async_playwright() as p:
@@ -42,13 +50,18 @@ class SemiAutoLoginManager:
                 )
                 page = await context.new_page()
                 
-                # 存储提取的凭证
-                credentials = {'invoker_id': None, 'session_id': None}
-                
+                # 存储提取的凭证和Git参数
+                credentials = {
+                    'invoker_id': None,
+                    'session_id': None,
+                    'git_params': None  # {project_id, repository_id, file_path}
+                }
+
                 # 监听所有网络请求
                 def capture_credentials(request):
                     headers = request.headers
-                    
+                    url = request.url
+
                     # 尝试多种可能的 header 名称
                     for key, value in headers.items():
                         key_lower = key.lower()
@@ -58,16 +71,35 @@ class SemiAutoLoginManager:
                         if key_lower in ['sessionid', 'session-id']:
                             if value and value != 'undefined':
                                 credentials['session_id'] = value
-                    
+                        if key_lower == 'projectid':
+                            if value and value != 'undefined':
+                                if not credentials['git_params']:
+                                    credentials['git_params'] = {}
+                                credentials['git_params']['project_id'] = value
+
+                    # 提取 Git 仓库参数（从 repositoryDetail API）
+                    if 'repositoryDetail' in url and 'repositoryId=' in url:
+                        import re
+                        match = re.search(r'repositoryId=(\d+)', url)
+                        if match:
+                            if not credentials['git_params']:
+                                credentials['git_params'] = {}
+                            credentials['git_params']['repository_id'] = match.group(1)
+                            print(f"\n📦 检测到仓库访问，仓库ID: {match.group(1)}")
+
                     # 如果两个都拿到了，输出提示
                     if credentials['invoker_id'] and credentials['session_id']:
                         if not hasattr(capture_credentials, 'notified'):
                             print(f"\n✅ 凭证已自动捕获！")
                             print(f"   Invoker ID: {credentials['invoker_id']}")
                             print(f"   Session ID: {credentials['session_id'][:30]}...")
-                            print(f"   可以关闭浏览器了")
+                            if credentials.get('git_params'):
+                                print(f"   项目ID: {credentials['git_params'].get('project_id', '未检测到')}")
+                                print(f"   仓库ID: {credentials['git_params'].get('repository_id', '未检测到')}")
+                            if not keep_open:
+                                print(f"   可以关闭浏览器了")
                             capture_credentials.notified = True
-                
+
                 page.on('request', capture_credentials)
                 
                 # 打开登录页
@@ -84,21 +116,36 @@ class SemiAutoLoginManager:
                 
                 while waited < max_wait:
                     if credentials['invoker_id'] and credentials['session_id']:
-                        print("\n🎉 登录成功！正在关闭浏览器...")
-                        await asyncio.sleep(2)
-                        break
-                    
+                        if not keep_open:
+                            print("\n🎉 登录成功！正在关闭浏览器...")
+                            await asyncio.sleep(2)
+                            break
+                        else:
+                            # Git模式：等待用户导航到仓库页面
+                            if credentials.get('git_params') and credentials['git_params'].get('repository_id'):
+                                print("\n✅ 已检测到仓库页面！")
+                                user_confirm = input("是否使用检测到的参数？(y/n，输入n可继续等待): ").strip().lower()
+                                if user_confirm == 'y':
+                                    break
+                            else:
+                                # 每10秒提示一次
+                                if waited % 10 == 0 and waited > 10:
+                                    print(f"⏱️  等待导航到仓库页面... ({waited}秒)")
+
                     await asyncio.sleep(check_interval)
                     waited += check_interval
-                    
+
                     # 每30秒提示一次
                     if waited % 30 == 0 and waited > 0:
                         print(f"⏱️  已等待 {waited} 秒... (登录后请刷新页面以触发请求)")
-                
-                await browser.close()
-                
+
+                if not keep_open:
+                    await browser.close()
+                else:
+                    print("\n💡 浏览器保持打开状态，完成后请手动关闭")
+
                 if credentials['invoker_id'] and credentials['session_id']:
-                    return credentials['invoker_id'], credentials['session_id']
+                    return credentials['invoker_id'], credentials['session_id'], credentials.get('git_params')
                 else:
                     print("❌ 未能提取凭证")
                     print("💡 可能原因:")
@@ -628,9 +675,251 @@ class CodeFreeSimulator:
         print(f"[{self.invoker_id}] 完成！补全次数: {self.completion_count}, 耗时: {elapsed:.1f}秒")
 
 
+class GitCommitSimulator:
+    """Git 提交模拟器"""
+
+    def __init__(self, invoker_id: str, session_id: str, project_id: str, repository_id: str,
+                 file_path: str = "README.md", max_commits: int = 8):
+        """
+        初始化 Git 提交模拟器
+
+        Args:
+            invoker_id: 用户ID
+            session_id: 会话ID
+            project_id: 项目ID
+            repository_id: 仓库ID
+            file_path: 要提交的文件路径
+            max_commits: 最大提交次数
+        """
+        self.invoker_id = invoker_id
+        self.session_id = session_id
+        self.project_id = project_id
+        self.repository_id = repository_id
+        self.file_path = file_path
+        self.max_commits = max_commits
+        self.commit_count = 0
+        self.start_time = None
+
+        # 仓库信息（通过API获取）
+        self.repo_full_name: Optional[str] = None
+        self.branch_name: Optional[str] = None
+
+        # 文件内容变更模板（简短内容）
+        self.content_templates = [
+            "# {title}\n\n更新时间: {timestamp}",
+            "# {title}\n\nVersion: {version}\n\n这是一个测试文件",
+            "# Project: {title}\n\n状态: 正常\n\n最后更新: {timestamp}",
+            "# {title}\n\n## 简介\n\n这是项目文档 v{version}",
+            "# README\n\n项目名称: {title}\n时间戳: {timestamp}",
+            "# {title}\n\n*更新于 {timestamp}*\n\n---\n\n简单说明文档",
+        ]
+
+    def _get_random_content(self) -> str:
+        """生成随机文件内容"""
+        template = random.choice(self.content_templates)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        version = f"{random.randint(1, 9)}.{random.randint(0, 9)}.{random.randint(0, 99)}"
+        title = random.choice(["项目文档", "README", "开发文档", "使用说明", "项目说明"])
+
+        content = template.format(
+            title=title,
+            timestamp=timestamp,
+            version=version
+        )
+
+        # 随机添加一些额外内容使每次都不同
+        extra = f"\n\n<!-- commit-{self.commit_count + 1}-{int(time.time())} -->"
+        return content + extra
+
+    def get_repository_detail(self) -> bool:
+        """获取仓库详情"""
+        url = f"https://www.srdcloud.cn/api/codebackend/codecenter/repository/v1/repositoryDetail"
+
+        headers = {
+            "Accept": "application/json",
+            "projectid": self.project_id,
+            "sessionid": self.session_id,
+            "userid": self.invoker_id
+        }
+
+        params = {
+            "repositoryId": self.repository_id
+        }
+
+        try:
+            print(f"[{self.invoker_id}] 正在获取仓库信息...")
+            response = requests.get(url, headers=headers, params=params, verify=False)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("code") == 0:
+                    repo_data = data.get("data", {})
+                    self.repo_full_name = repo_data.get("repoFullName")
+                    self.branch_name = repo_data.get("defaultBranchName", "master")
+
+                    print(f"[{self.invoker_id}] ✅ 仓库信息获取成功")
+                    print(f"   仓库名称: {self.repo_full_name}")
+                    print(f"   默认分支: {self.branch_name}")
+                    return True
+                else:
+                    print(f"[{self.invoker_id}] ❌ 获取仓库信息失败: {data.get('msg')}")
+                    return False
+            else:
+                print(f"[{self.invoker_id}] ❌ HTTP请求失败: {response.status_code}")
+                return False
+
+        except Exception as e:
+            print(f"[{self.invoker_id}] ❌ 获取仓库信息异常: {e}")
+            return False
+
+    def commit_file(self) -> bool:
+        """提交文件"""
+        if not self.repo_full_name or not self.branch_name:
+            print(f"[{self.invoker_id}] ❌ 仓库信息未初始化")
+            return False
+
+        url = "https://www.srdcloud.cn/api/codebackend/codecenter/gitclient/v1/commitFiles"
+
+        headers = {
+            "projectid": self.project_id,
+            "sessionid": self.session_id,
+            "userid": self.invoker_id
+        }
+
+        # 生成随机内容
+        file_content = self._get_random_content()
+        commit_message = f"更新文件 {self.repo_full_name}/{self.file_path}"
+
+        # 处理文件内容：转义换行符（不需要转义 #）
+        # 参考成功的 Python requests 格式
+        escaped_content = file_content.replace('\n', '\\n')
+
+        # 构建JSON字符串（不需要外层引号，不需要转义内部引号）
+        # 使用 separators=(',', ':') 去除空格
+        repository_json = json.dumps({
+            "repoId": self.repository_id,
+            "repoFullName": self.repo_full_name
+        }, separators=(',', ':'))
+
+        branch_json = json.dumps({
+            "branchName": self.branch_name,
+            "needReview": 0
+        }, separators=(',', ':'))
+
+        files_json = json.dumps([{
+            "fileType": 0,
+            "filePath": self.file_path,
+            "fileContent": escaped_content,
+            "fileCommitMessage": commit_message
+        }], separators=(',', ':'))
+
+        # 使用 files 参数来发送 multipart/form-data
+        # 注意：不需要外层双引号！
+        files_data = {
+            "operationType": (None, '4'),
+            "repository": (None, repository_json),
+            "branch": (None, branch_json),
+            "files": (None, files_json)
+        }
+
+        try:
+            print(f"[{self.invoker_id}] 正在提交文件 #{self.commit_count + 1}/{self.max_commits}...")
+
+            # 打印调试信息
+            print(f"\n{'='*60}")
+            print(f"📝 请求详情:")
+            print(f"{'='*60}")
+            print(f"URL: {url}")
+            print(f"Headers:")
+            for k, v in headers.items():
+                print(f"  {k}: {v}")
+            print(f"\nFiles Data (multipart/form-data):")
+            print(f"  operationType: {files_data['operationType'][1]}")
+            print(f"  repository: {files_data['repository'][1][:100]}...")
+            print(f"  branch: {files_data['branch'][1]}")
+            print(f"  files: {files_data['files'][1][:200]}...")
+            print(f"\n文件内容预览:")
+            print(f"{file_content}")
+            print(f"{'='*60}\n")
+
+            # 使用 files 参数发送 multipart/form-data
+            response = requests.post(url, headers=headers, files=files_data, verify=False)
+
+            print(f"\n{'='*60}")
+            print(f"📨 响应详情:")
+            print(f"{'='*60}")
+            print(f"Status Code: {response.status_code}")
+            print(f"Response Headers:")
+            for k, v in response.headers.items():
+                print(f"  {k}: {v}")
+            print(f"\nResponse Body:")
+            print(f"{response.text}")
+            print(f"{'='*60}\n")
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("code") == 0:
+                    self.commit_count += 1
+                    print(f"[{self.invoker_id}] ✅ 提交成功 #{self.commit_count}/{self.max_commits}")
+                    return True
+                elif result.get("code") == 2928:
+                    print(f"[{self.invoker_id}] ⚠️  提交被忽略（内容未变更或被过滤）")
+                    # 仍然算作一次尝试
+                    self.commit_count += 1
+                    return True
+                else:
+                    print(f"[{self.invoker_id}] ❌ 提交失败: {result.get('msg')}")
+                    print(f"[{self.invoker_id}] 完整错误信息: {json.dumps(result, ensure_ascii=False, indent=2)}")
+                    return False
+            else:
+                print(f"[{self.invoker_id}] ❌ HTTP请求失败: {response.status_code}")
+                return False
+
+        except Exception as e:
+            print(f"[{self.invoker_id}] ❌ 提交异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def run(self):
+        """运行Git提交模拟"""
+        self.start_time = datetime.now()
+
+        print(f"\n[{self.invoker_id}] 开始 Git 提交模拟...")
+        print(f"   项目ID: {self.project_id}")
+        print(f"   仓库ID: {self.repository_id}")
+        print(f"   文件路径: {self.file_path}")
+        print(f"   目标提交次数: {self.max_commits}\n")
+
+        # 获取仓库信息
+        if not self.get_repository_detail():
+            print(f"[{self.invoker_id}] ❌ 无法获取仓库信息，退出")
+            return
+
+        # 开始提交循环
+        while self.commit_count < self.max_commits:
+            success = self.commit_file()
+
+            if not success:
+                print(f"[{self.invoker_id}] 提交失败，停止")
+                break
+
+            # 随机延迟
+            if self.commit_count < self.max_commits:
+                delay = random.uniform(1.0, 3.0)
+                print(f"[{self.invoker_id}] 等待 {delay:.1f} 秒...\n")
+                time.sleep(delay)
+
+        # 统计
+        elapsed = (datetime.now() - self.start_time).total_seconds()
+        print(f"\n[{self.invoker_id}] 完成！")
+        print(f"   提交次数: {self.commit_count}/{self.max_commits}")
+        print(f"   耗时: {elapsed:.1f}秒")
+
+
 class SimulatorManager:
     """模拟器管理器"""
-    
+
     def __init__(self):
         self.simulators: List[CodeFreeSimulator] = []
         
@@ -709,9 +998,10 @@ def print_menu():
   2. ✋ 手动模式 (直接输入凭证)
   3. 📦 批量模式 (从文件导入多账号)
   4. 📝 生成配置文件模板
-  5. 🚪 退出
+  5. 🔨 Git 提交模式 (模拟Git提交操作)
+  6. 🚪 退出
 
-请输入选项 (1-5): """
+请输入选项 (1-6): """
     return input(menu).strip()
 
 
@@ -921,6 +1211,132 @@ async def batch_mode():
         print("\n\n⚠️  收到中断信号，正在停止所有模拟器...")
 
 
+async def git_commit_mode():
+    """Git 提交模式"""
+    print("\n" + "="*50)
+    print("🔨 Git 提交模式")
+    print("="*50)
+
+    print("\n💡 提示:")
+    print("   此模式用于模拟 Git 提交操作")
+    print("   需要提供项目ID、仓库ID和文件路径")
+    print("   仓库信息将自动获取\n")
+
+    # 选择凭证获取方式
+    print("请选择凭证获取方式:")
+    print("  1. 半自动登录（推荐）")
+    print("  2. 手动输入凭证")
+    cred_choice = input("请输入选项 (1-2, 默认 1): ").strip()
+
+    invoker_id = None
+    session_id = None
+
+    git_params = None
+
+    if cred_choice == "2":
+        # 手动输入
+        invoker_id = input("请输入 Invoker ID (User ID): ").strip()
+        session_id = input("请输入 Session ID: ").strip()
+
+        if not invoker_id or not session_id:
+            print("❌ Invoker ID 和 Session ID 不能为空")
+            return
+    else:
+        # 半自动登录（Git模式：保持浏览器打开）
+        print("\n正在启动半自动登录...")
+        print("💡 登录后请导航到仓库页面，脚本会自动提取参数\n")
+        manager = SemiAutoLoginManager()
+        result = await manager.semi_auto_login(keep_open=True)
+
+        if not result:
+            print("\n❌ 未能获取凭证")
+            return
+
+        invoker_id, session_id, git_params = result
+        print(f"\n✅ 凭证获取成功!")
+        print(f"   Invoker ID: {invoker_id}")
+        print(f"   Session ID: {session_id[:30]}...")
+
+    # 输入Git参数
+    print("\n" + "-"*50)
+    print("请输入 Git 仓库参数:\n")
+
+    # 如果自动提取到了参数，显示并询问是否使用
+    if git_params and git_params.get('project_id') and git_params.get('repository_id'):
+        print(f"✅ 已自动检测到:")
+        print(f"   项目ID: {git_params['project_id']}")
+        print(f"   仓库ID: {git_params['repository_id']}")
+        use_detected = input("\n是否使用检测到的参数? (y/n, 默认 y): ").strip().lower()
+
+        if use_detected != 'n':
+            project_id = git_params['project_id']
+            repository_id = git_params['repository_id']
+        else:
+            project_id = input("项目ID (Project ID): ").strip()
+            repository_id = input("仓库ID (Repository ID): ").strip()
+    else:
+        project_id = input("项目ID (Project ID): ").strip()
+        repository_id = input("仓库ID (Repository ID): ").strip()
+
+    file_path = input("文件路径 (默认: README.md): ").strip()
+
+    if not file_path:
+        file_path = "README.md"
+
+    if not project_id or not repository_id:
+        print("❌ 项目ID 和 仓库ID 不能为空")
+        return
+
+    # 输入提交次数
+    default_max = 8
+    max_limit = 10
+    max_commits_input = input(f"\n请输入最大提交次数 (默认 {default_max}，最大 {max_limit}，直接回车使用默认值): ").strip()
+    max_commits = int(max_commits_input) if max_commits_input.isdigit() else default_max
+    if max_commits > max_limit:
+        print(f"⚠️  超过最大限制，已调整为 {max_limit}")
+        max_commits = max_limit
+
+    # 显示配置信息
+    print(f"\n📊 配置信息:")
+    print(f"  Invoker ID: {invoker_id}")
+    print(f"  Session ID: {session_id[:30]}...")
+    print(f"  项目ID: {project_id}")
+    print(f"  仓库ID: {repository_id}")
+    print(f"  文件路径: {file_path}")
+    print(f"  提交次数: {max_commits}")
+
+    confirm = input(f"\n确认开始 Git 提交? (y/n): ").strip().lower()
+
+    if confirm != 'y':
+        print("已取消")
+        return
+
+    print(f"\n🚀 开始 Git 提交模拟...\n")
+
+    # 创建并运行模拟器
+    simulator = GitCommitSimulator(
+        invoker_id=invoker_id,
+        session_id=session_id,
+        project_id=project_id,
+        repository_id=repository_id,
+        file_path=file_path,
+        max_commits=max_commits
+    )
+
+    try:
+        # 禁用SSL警告
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        simulator.run()
+    except KeyboardInterrupt:
+        print("\n\n⚠️  收到中断信号，正在停止...")
+    except Exception as e:
+        print(f"\n❌ 运行出错: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def generate_template():
     """生成配置文件模板"""
     print("\n" + "="*50)
@@ -976,6 +1392,9 @@ async def main():
                 generate_template()
                 print()
             elif choice == '5':
+                await git_commit_mode()
+                break
+            elif choice == '6':
                 print("\n👋 再见!")
                 sys.exit(0)
             else:
