@@ -7,6 +7,7 @@ import websockets
 import sys
 import os
 import ssl
+import glob
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 from playwright.async_api import async_playwright
@@ -115,11 +116,12 @@ class SemiAutoLoginManager:
 
 
 class CodeFreeSimulator:
-    def __init__(self, invoker_id: str, session_id: str, client_platform: str = "", 
-                 filename: str = "", max_completions: int = 2000, disable_ssl_verification: bool = True):
+    def __init__(self, invoker_id: str, session_id: str, client_platform: str = "",
+                 filename: str = "", max_completions: int = 2000, disable_ssl_verification: bool = True,
+                 mode: str = "completion", src_dir: str = "src"):
         """
         初始化模拟器
-        
+
         Args:
             invoker_id: 用户ID (必填)
             session_id: 会话ID (必填)
@@ -127,6 +129,8 @@ class CodeFreeSimulator:
             filename: 文件路径
             max_completions: 最大补全次数
             disable_ssl_verification: 是否禁用SSL证书验证 (默认True，解决证书问题)
+            mode: 运行模式 ("completion" 代码补全, "comment" 代码注释生成)
+            src_dir: 代码注释模式下的源文件目录
         """
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.channel_id: Optional[str] = None
@@ -141,6 +145,13 @@ class CodeFreeSimulator:
         self.running = True
         self.start_time = None
         self.disable_ssl_verification = disable_ssl_verification
+        self.mode = mode
+        self.src_dir = src_dir
+        self.src_files: List[str] = []
+
+        # 如果是注释模式，加载源文件列表
+        if self.mode == "comment":
+            self._load_src_files()
 
         # 模拟代码内容变化
         self.code_variations = [
@@ -163,7 +174,7 @@ class CodeFreeSimulator:
         """自动检测平台信息"""
         system = platform.system().lower()
         machine = platform.machine().lower()
-        
+
         if system == "darwin":
             return "macos-arm64" if "arm" in machine or "aarch64" in machine else "macos-x64"
         elif system == "windows":
@@ -171,6 +182,51 @@ class CodeFreeSimulator:
         elif system == "linux":
             return "linux-x64"
         return f"{system}-{machine}"
+
+    def _load_src_files(self):
+        """加载源文件列表"""
+        if not os.path.exists(self.src_dir):
+            print(f"[{self.invoker_id}] 警告: 源文件目录不存在: {self.src_dir}")
+            return
+
+        # 支持多种代码文件扩展名
+        patterns = ['*.ts', '*.tsx', '*.js', '*.jsx', '*.py', '*.java', '*.go', '*.cpp', '*.c', '*.h']
+        for pattern in patterns:
+            files = glob.glob(os.path.join(self.src_dir, '**', pattern), recursive=True)
+            self.src_files.extend(files)
+
+        # 限制最多20个文件
+        if len(self.src_files) > 20:
+            self.src_files = random.sample(self.src_files, 20)
+
+        print(f"[{self.invoker_id}] 已加载 {len(self.src_files)} 个源文件")
+
+    def _read_file_content(self, filepath: str) -> str:
+        """读取文件内容"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return content
+        except Exception as e:
+            print(f"[{self.invoker_id}] 读取文件失败 {filepath}: {e}")
+            return ""
+
+    def _get_file_language(self, filepath: str) -> str:
+        """根据文件扩展名判断语言"""
+        ext = os.path.splitext(filepath)[1].lower()
+        language_map = {
+            '.ts': 'typescript',
+            '.tsx': 'typescript',
+            '.js': 'javascript',
+            '.jsx': 'javascript',
+            '.py': 'python',
+            '.java': 'java',
+            '.go': 'go',
+            '.cpp': 'cpp',
+            '.c': 'c',
+            '.h': 'c'
+        }
+        return language_map.get(ext, 'javascript')
 
     def generate_req_id(self) -> str:
         """生成请求ID"""
@@ -298,7 +354,7 @@ class CodeFreeSimulator:
         if not self.api_key:
             print(f"[{self.invoker_id}] 错误: API密钥尚未获取")
             return
-            
+
         req_id = self.generate_req_id()
         code_variation = self.get_random_code_variation()
 
@@ -329,6 +385,87 @@ class CodeFreeSimulator:
 
         print(f"[{self.invoker_id}] 请求代码补全 #{self.completion_count + 1}/{self.max_completions}")
         await self.send_message("CodeGenRequest", context, payload)
+
+    async def request_code_comment(self):
+        """请求代码注释生成"""
+        if not self.api_key:
+            print(f"[{self.invoker_id}] 错误: API密钥尚未获取")
+            return
+
+        if not self.src_files:
+            print(f"[{self.invoker_id}] 错误: 没有可用的源文件")
+            await self.disconnect()
+            return
+
+        # 随机选择一个文件
+        filepath = random.choice(self.src_files)
+        content = self._read_file_content(filepath)
+
+        if not content:
+            print(f"[{self.invoker_id}] 跳过空文件: {filepath}")
+            # 继续下一个
+            delay = random.uniform(0.5, 1.5)
+            await asyncio.sleep(delay)
+            await self.request_code_comment()
+            return
+
+        language = self._get_file_language(filepath)
+        filename = os.path.basename(filepath)
+
+        req_id = self.generate_req_id()
+        dialog_id = str(uuid.uuid4())
+        session_id_comment = str(uuid.uuid4())
+
+        # 构建代码块
+        code_block = f"```{language}\n{content}\n```"
+        prompt_content = f"{code_block}\n生成代码注释"
+
+        context = {
+            "messageName": "CodeChatRequest",
+            "reqId": req_id,
+            "invokerId": self.invoker_id,
+            "sessionId": session_id_comment,
+            "version": "2.1.0",
+            "apiKey": self.api_key
+        }
+
+        payload = {
+            "clientType": "vscode",
+            "clientVersion": "1.106.0-insider",
+            "gitUrls": [],
+            "clientPlatform": self.client_platform,
+            "pluginVersion": "2.1.0",
+            "messages": {
+                "max_new_tokens": 4096,
+                "sub_service": "codecomment",
+                "prompts": [
+                    {
+                        "role": "system",
+                        "content": "我的名字是研发云编程助手CodeFree，我使用中文进行交流，作为一个高度智能化的自然语言编程助手,我是由研发云团队使用最先进的技术和大量数据训练而成。\n我的核心目标是以友好、简单、清晰的方式帮助用户解决编程问题。我拥有深厚的编程知识,涵盖各种流行的编程语言和框架,如Python、Java、JavaScript、C++等。我也掌握广泛的计算机科学知识,如数据结构、算法、操作系统、网络等。\n对于用户提出的任何编程相关的问题,我都能给出最佳的解决方案。我会解析问题的本质,运用丰富的知识库推导出正确的代码实现。如果需要,我还会给出多种可选方案的对比分析。\n最后,我会恪守对用户隐私的尊重,所有对话内容仅用于提升我自身的能力,不会泄露或记录任何用户个人信息。请尽管提出你的编程问题,我会提供最专业和有价值的帮助。\n我会用中文来回答你的问题。"
+                    },
+                    {
+                        "files": [
+                            {
+                                "path": filepath,
+                                "text": code_block,
+                                "startLine": 0,
+                                "endLine": len(content.split('\n'))
+                            }
+                        ],
+                        "content": prompt_content,
+                        "role": "user",
+                        "workItems": []
+                    }
+                ],
+                "dialogId": dialog_id,
+                "questionType": "newAsk",
+                "parentReqId": "",
+                "kbId": ""
+            }
+        }
+
+        print(f"[{self.invoker_id}] 请求代码注释 #{self.completion_count + 1}/{self.max_completions} - {filename}")
+        await self.send_message("CodeChatRequest", context, payload)
 
     async def send_user_activity(self, activity_type: str = "code_display"):
         """发送用户活动通知"""
@@ -409,6 +546,31 @@ class CodeFreeSimulator:
                 await asyncio.sleep(delay)
                 await self.request_code_generation()
 
+            elif message_name == "CodeChatRequest_resp":
+                payload = message.get("payload", {})
+                is_end = payload.get("isEnd", 0)
+                answer = payload.get("answer", "")
+
+                # 只在流式响应结束时计数
+                if is_end == 1:
+                    self.completion_count += 1
+                    print(f"[{self.invoker_id}] 代码注释生成完成 #{self.completion_count}/{self.max_completions}")
+
+                    await self.send_user_activity("chat_gen_code")
+
+                    if self.completion_count >= self.max_completions:
+                        print(f"[{self.invoker_id}] 已完成 {self.max_completions} 次，准备断开...")
+                        await self.disconnect()
+                        return
+
+                    delay = random.uniform(0.5, 2.5)
+                    await asyncio.sleep(delay)
+                    await self.request_code_comment()
+                else:
+                    # 流式输出片段
+                    if answer:
+                        print(f"[{self.invoker_id}] 收到注释片段: \"{answer[:30]}...\"", end='\r')
+
             elif message_name == "ServerHeartbeat":
                 await self.send_message("ServerHeartbeatResponse")
 
@@ -435,9 +597,14 @@ class CodeFreeSimulator:
 
     async def start_coding_simulation(self):
         """开始模拟编码过程"""
-        print(f"[{self.invoker_id}] 开始模拟编码...")
-        await asyncio.sleep(1)
-        await self.request_code_generation()
+        if self.mode == "completion":
+            print(f"[{self.invoker_id}] 开始模拟代码补全...")
+            await asyncio.sleep(1)
+            await self.request_code_generation()
+        elif self.mode == "comment":
+            print(f"[{self.invoker_id}] 开始模拟代码注释生成...")
+            await asyncio.sleep(1)
+            await self.request_code_comment()
 
     async def disconnect(self):
         """断开连接"""
@@ -495,27 +662,29 @@ class SimulatorManager:
             print(f"❌ 读取文件失败: {e}")
             return []
     
-    async def run_simulator(self, invoker_id: str, session_id: str, max_completions: int = 2000, 
-                          disable_ssl_verification: bool = True):
+    async def run_simulator(self, invoker_id: str, session_id: str, max_completions: int = 2000,
+                          disable_ssl_verification: bool = True, mode: str = "completion", src_dir: str = "src"):
         """运行单个模拟器"""
         simulator = CodeFreeSimulator(
             invoker_id=invoker_id,
             session_id=session_id,
             max_completions=max_completions,
-            disable_ssl_verification=disable_ssl_verification
+            disable_ssl_verification=disable_ssl_verification,
+            mode=mode,
+            src_dir=src_dir
         )
         self.simulators.append(simulator)
-        
+
         try:
             await simulator.connect()
         except Exception as e:
             print(f"[{invoker_id}] 运行失败: {e}")
-    
-    async def run_batch(self, accounts: List[Dict[str, str]], max_completions: int = 2000, 
-                      disable_ssl_verification: bool = True):
+
+    async def run_batch(self, accounts: List[Dict[str, str]], max_completions: int = 2000,
+                      disable_ssl_verification: bool = True, mode: str = "completion", src_dir: str = "src"):
         """批量运行多个模拟器"""
         tasks = [
-            self.run_simulator(acc['invoker_id'], acc['session_id'], max_completions, disable_ssl_verification)
+            self.run_simulator(acc['invoker_id'], acc['session_id'], max_completions, disable_ssl_verification, mode, src_dir)
             for acc in accounts
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -551,37 +720,54 @@ async def semi_auto_mode():
     print("\n" + "="*50)
     print("🤖 半自动登录模式")
     print("="*50)
-    
+
     manager = SemiAutoLoginManager()
     result = await manager.semi_auto_login()
-    
+
     if not result:
         print("\n❌ 未能获取凭证")
         print("💡 您可以尝试:")
         print("   - 重新运行并在登录后刷新页面")
         print("   - 使用手动模式 (选项 2)")
         return
-    
+
     invoker_id, session_id = result
-    
+
     print(f"\n✅ 凭证获取成功!")
     print(f"   Invoker ID: {invoker_id}")
     print(f"   Session ID: {session_id[:30]}...")
-    
-    # 询问运行参数
+
+    # 选择运行模式
     print("\n" + "-"*50)
-    max_completions_input = input("请输入最大补全次数 (默认 2000，直接回车使用默认值): ").strip()
+    print("请选择运行模式:")
+    print("  1. 代码补全 (Code Completion)")
+    print("  2. 代码注释生成 (Code Comment Generation)")
+    mode_choice = input("请输入选项 (1-2, 默认 1): ").strip()
+    mode = "comment" if mode_choice == "2" else "completion"
+
+    # 如果是注释模式，询问源文件目录
+    src_dir = "src"
+    if mode == "comment":
+        src_dir_input = input("请输入源文件目录路径 (默认: src): ").strip()
+        if src_dir_input:
+            src_dir = src_dir_input
+
+    # 询问运行参数
+    max_completions_input = input("请输入最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
     max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
-    
+
     print(f"\n📊 配置信息:")
     print(f"  Invoker ID: {invoker_id}")
     print(f"  Session ID: {session_id[:30]}...")
-    print(f"  最大补全次数: {max_completions}")
+    print(f"  运行模式: {'代码注释生成' if mode == 'comment' else '代码补全'}")
+    if mode == "comment":
+        print(f"  源文件目录: {src_dir}")
+    print(f"  最大任务次数: {max_completions}")
     print(f"\n🚀 开始运行模拟器...\n")
-    
+
     sim_manager = SimulatorManager()
     try:
-        await sim_manager.run_simulator(invoker_id, session_id, max_completions, disable_ssl_verification=True)
+        await sim_manager.run_simulator(invoker_id, session_id, max_completions, disable_ssl_verification=True, mode=mode, src_dir=src_dir)
     except KeyboardInterrupt:
         print("\n\n⚠️  收到中断信号，正在停止...")
 
@@ -591,35 +777,52 @@ async def manual_mode():
     print("\n" + "="*50)
     print("✋ 手动模式")
     print("="*50)
-    
+
     print("\n💡 获取凭证的方法:")
     print("   1. 打开 https://www.srdcloud.cn/login 并登录")
     print("   2. 按 F12 打开开发者工具 -> Network 标签")
     print("   3. 刷新页面或点击任意链接")
     print("   4. 找到任意请求，查看 Request Headers")
     print("   5. 找到 userid 和 sessionid 字段\n")
-    
+
     invoker_id = input("请输入 Invoker ID (User ID): ").strip()
     session_id = input("请输入 Session ID: ").strip()
-    
+
     if not invoker_id or not session_id:
         print("❌ Invoker ID 和 Session ID 不能为空")
         return
-    
-    # 询问运行参数
+
+    # 选择运行模式
     print("\n" + "-"*50)
-    max_completions_input = input("请输入最大补全次数 (默认 2000，直接回车使用默认值): ").strip()
+    print("请选择运行模式:")
+    print("  1. 代码补全 (Code Completion)")
+    print("  2. 代码注释生成 (Code Comment Generation)")
+    mode_choice = input("请输入选项 (1-2, 默认 1): ").strip()
+    mode = "comment" if mode_choice == "2" else "completion"
+
+    # 如果是注释模式，询问源文件目录
+    src_dir = "src"
+    if mode == "comment":
+        src_dir_input = input("请输入源文件目录路径 (默认: src): ").strip()
+        if src_dir_input:
+            src_dir = src_dir_input
+
+    # 询问运行参数
+    max_completions_input = input("请输入最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
     max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
-    
+
     print(f"\n📊 配置信息:")
     print(f"  Invoker ID: {invoker_id}")
     print(f"  Session ID: {session_id[:30]}...")
-    print(f"  最大补全次数: {max_completions}")
+    print(f"  运行模式: {'代码注释生成' if mode == 'comment' else '代码补全'}")
+    if mode == "comment":
+        print(f"  源文件目录: {src_dir}")
+    print(f"  最大任务次数: {max_completions}")
     print(f"\n🚀 开始运行模拟器...\n")
-    
+
     manager = SimulatorManager()
     try:
-        await manager.run_simulator(invoker_id, session_id, max_completions, disable_ssl_verification=True)
+        await manager.run_simulator(invoker_id, session_id, max_completions, disable_ssl_verification=True, mode=mode, src_dir=src_dir)
     except KeyboardInterrupt:
         print("\n\n⚠️  收到中断信号，正在停止...")
 
@@ -629,42 +832,64 @@ async def batch_mode():
     print("\n" + "="*50)
     print("📦 批量模式")
     print("="*50)
-    
+
     filepath = input("\n请输入配置文件路径 (默认: accounts.txt): ").strip()
-    
+
     if not filepath:
         filepath = "accounts.txt"
-    
+
     if not os.path.exists(filepath):
         print(f"❌ 文件不存在: {filepath}")
         print("💡 您可以使用选项 4 生成配置文件模板")
         return
-    
+
     manager = SimulatorManager()
     accounts = manager.load_from_file(filepath)
-    
+
     if not accounts:
         print("❌ 没有加载到有效账号")
         return
-    
+
     print(f"\n📊 将运行 {len(accounts)} 个模拟器")
     for idx, acc in enumerate(accounts, 1):
         print(f"   {idx}. Invoker ID: {acc['invoker_id']}")
-    
+
+    # 选择运行模式
+    print("\n" + "-"*50)
+    print("请选择运行模式:")
+    print("  1. 代码补全 (Code Completion)")
+    print("  2. 代码注释生成 (Code Comment Generation)")
+    mode_choice = input("请输入选项 (1-2, 默认 1): ").strip()
+    mode = "comment" if mode_choice == "2" else "completion"
+
+    # 如果是注释模式，询问源文件目录
+    src_dir = "src"
+    if mode == "comment":
+        src_dir_input = input("请输入源文件目录路径 (默认: src): ").strip()
+        if src_dir_input:
+            src_dir = src_dir_input
+
     # 询问运行参数
-    max_completions_input = input("\n请输入每个账号的最大补全次数 (默认 2000，直接回车使用默认值): ").strip()
+    max_completions_input = input("\n请输入每个账号的最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
     max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
-    
+
+    print(f"\n📊 最终配置:")
+    print(f"  运行模式: {'代码注释生成' if mode == 'comment' else '代码补全'}")
+    if mode == "comment":
+        print(f"  源文件目录: {src_dir}")
+    print(f"  账号数量: {len(accounts)}")
+    print(f"  每账号任务次数: {max_completions}")
+
     confirm = input(f"\n确认开始批量运行? (y/n): ").strip().lower()
-    
+
     if confirm != 'y':
         print("已取消")
         return
-    
+
     print(f"\n🚀 开始批量运行 {len(accounts)} 个模拟器...\n")
-    
+
     try:
-        await manager.run_batch(accounts, max_completions, disable_ssl_verification=True)
+        await manager.run_batch(accounts, max_completions, disable_ssl_verification=True, mode=mode, src_dir=src_dir)
     except KeyboardInterrupt:
         print("\n\n⚠️  收到中断信号，正在停止所有模拟器...")
 
