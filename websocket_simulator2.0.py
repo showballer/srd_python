@@ -753,8 +753,17 @@ async def semi_auto_mode():
             src_dir = src_dir_input
 
     # 询问运行参数
-    max_completions_input = input("请输入最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
-    max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
+    if mode == "comment":
+        default_max = 10
+        max_limit = 20
+        max_completions_input = input(f"请输入最大任务次数 (默认 {default_max}，最大 {max_limit}，直接回车使用默认值): ").strip()
+        max_completions = int(max_completions_input) if max_completions_input.isdigit() else default_max
+        if max_completions > max_limit:
+            print(f"⚠️  超过最大限制，已调整为 {max_limit}")
+            max_completions = max_limit
+    else:
+        max_completions_input = input("请输入最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
+        max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
 
     print(f"\n📊 配置信息:")
     print(f"  Invoker ID: {invoker_id}")
@@ -808,8 +817,17 @@ async def manual_mode():
             src_dir = src_dir_input
 
     # 询问运行参数
-    max_completions_input = input("请输入最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
-    max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
+    if mode == "comment":
+        default_max = 10
+        max_limit = 20
+        max_completions_input = input(f"请输入最大任务次数 (默认 {default_max}，最大 {max_limit}，直接回车使用默认值): ").strip()
+        max_completions = int(max_completions_input) if max_completions_input.isdigit() else default_max
+        if max_completions > max_limit:
+            print(f"⚠️  超过最大限制，已调整为 {max_limit}")
+            max_completions = max_limit
+    else:
+        max_completions_input = input("请输入最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
+        max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
 
     print(f"\n📊 配置信息:")
     print(f"  Invoker ID: {invoker_id}")
@@ -870,8 +888,17 @@ async def batch_mode():
             src_dir = src_dir_input
 
     # 询问运行参数
-    max_completions_input = input("\n请输入每个账号的最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
-    max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
+    if mode == "comment":
+        default_max = 10
+        max_limit = 20
+        max_completions_input = input(f"\n请输入每个账号的最大任务次数 (默认 {default_max}，最大 {max_limit}，直接回车使用默认值): ").strip()
+        max_completions = int(max_completions_input) if max_completions_input.isdigit() else default_max
+        if max_completions > max_limit:
+            print(f"⚠️  超过最大限制，已调整为 {max_limit}")
+            max_completions = max_limit
+    else:
+        max_completions_input = input("\n请输入每个账号的最大任务次数 (默认 2000，直接回车使用默认值): ").strip()
+        max_completions = int(max_completions_input) if max_completions_input.isdigit() else 2000
 
     print(f"\n📊 最终配置:")
     print(f"  运行模式: {'代码注释生成' if mode == 'comment' else '代码补全'}")
