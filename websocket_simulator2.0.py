@@ -991,17 +991,28 @@ def print_banner():
 
 
 def print_menu():
-    """打印菜单"""
+    """打印主菜单"""
     menu = """
-请选择运行模式:
+请选择功能:
+  1. 🤖 辅助编程
+  2. 🔨 Git 提交 (模拟Git提交操作)
+  3. 🚪 退出
+
+请输入选项 (1-3): """
+    return input(menu).strip()
+
+
+def print_assisted_programming_menu():
+    """打印辅助编程子菜单"""
+    menu = """
+辅助编程 - 请选择运行模式:
   1. 🤖 半自动模式 (浏览器自动打开，手动登录，自动提取凭证) ⭐ 推荐
   2. ✋ 手动模式 (直接输入凭证)
   3. 📦 批量模式 (从文件导入多账号)
   4. 📝 生成配置文件模板
-  5. 🔨 Git 提交模式 (模拟Git提交操作)
-  6. 🚪 退出
+  5. 🔙 返回上级菜单
 
-请输入选项 (1-6): """
+请输入选项 (1-5): """
     return input(menu).strip()
 
 
@@ -1371,30 +1382,50 @@ def generate_template():
         print(f"❌ 生成文件失败: {e}")
 
 
-async def main():
-    """主函数"""
-    print_banner()
-    
+async def assisted_programming_mode():
+    """辅助编程模式 - 子菜单处理"""
     while True:
         try:
-            choice = print_menu()
-            
+            choice = print_assisted_programming_menu()
+
             if choice == '1':
                 await semi_auto_mode()
-                break
+                return
             elif choice == '2':
                 await manual_mode()
-                break
+                return
             elif choice == '3':
                 await batch_mode()
-                break
+                return
             elif choice == '4':
                 generate_template()
                 print()
             elif choice == '5':
+                # 返回上级菜单
+                return
+            else:
+                print("❌ 无效选项，请重新选择\n")
+        except Exception as e:
+            print(f"\n❌ 发生错误: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+
+
+async def main():
+    """主函数"""
+    print_banner()
+
+    while True:
+        try:
+            choice = print_menu()
+
+            if choice == '1':
+                await assisted_programming_mode()
+            elif choice == '2':
                 await git_commit_mode()
                 break
-            elif choice == '6':
+            elif choice == '3':
                 print("\n👋 再见!")
                 sys.exit(0)
             else:
