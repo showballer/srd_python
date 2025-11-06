@@ -15,6 +15,48 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 
 
+class CredentialManager:
+    """全局凭证管理器"""
+    def __init__(self):
+        self.invoker_id: Optional[str] = None
+        self.session_id: Optional[str] = None
+        self.project_id: Optional[str] = None
+        self.repository_id: Optional[str] = None
+
+    def set_credentials(self, invoker_id: str, session_id: str):
+        """设置凭证"""
+        self.invoker_id = invoker_id
+        self.session_id = session_id
+        print(f"\n✅ 凭证已保存到会话中")
+        print(f"   Invoker ID: {invoker_id}")
+        print(f"   Session ID: {session_id[:30]}...")
+
+    def set_git_params(self, project_id: str = None, repository_id: str = None):
+        """设置Git参数"""
+        if project_id:
+            self.project_id = project_id
+        if repository_id:
+            self.repository_id = repository_id
+
+    def has_credentials(self) -> bool:
+        """检查是否有凭证"""
+        return self.invoker_id is not None and self.session_id is not None
+
+    def clear_credentials(self):
+        """清除凭证"""
+        self.invoker_id = None
+        self.session_id = None
+        print("\n🔄 凭证已清除")
+
+    def get_credentials(self) -> Tuple[Optional[str], Optional[str]]:
+        """获取凭证"""
+        return self.invoker_id, self.session_id
+
+
+# 全局凭证管理器实例
+credential_manager = CredentialManager()
+
+
 class SemiAutoLoginManager:
     """半自动登录管理器"""
     
@@ -750,7 +792,13 @@ class GitCommitSimulator:
             print(f"[{self.invoker_id}] 正在获取仓库信息...")
             response = requests.get(url, headers=headers, params=params, verify=False)
 
-            if response.status_code == 200:
+            if response.status_code == 401:
+                print(f"[{self.invoker_id}] ❌ 认证失败 (401)")
+                print(f"[{self.invoker_id}] 凭证已过期或无效，请重新登录")
+                # 清除凭证
+                credential_manager.clear_credentials()
+                return False
+            elif response.status_code == 200:
                 data = response.json()
                 if data.get("code") == 0:
                     repo_data = data.get("data", {})
@@ -856,7 +904,13 @@ class GitCommitSimulator:
             print(f"{response.text}")
             print(f"{'='*60}\n")
 
-            if response.status_code == 200:
+            if response.status_code == 401:
+                print(f"[{self.invoker_id}] ❌ 认证失败 (401)")
+                print(f"[{self.invoker_id}] 凭证已过期或无效，请重新登录")
+                # 清除凭证，下次会提示重新登录
+                credential_manager.clear_credentials()
+                return False
+            elif response.status_code == 200:
                 result = response.json()
                 if result.get("code") == 0:
                     self.commit_count += 1
@@ -1022,21 +1076,34 @@ async def semi_auto_mode():
     print("🤖 半自动登录模式")
     print("="*50)
 
-    manager = SemiAutoLoginManager()
-    result = await manager.semi_auto_login()
+    # 检查是否已有凭证
+    invoker_id, session_id = None, None
+    if credential_manager.has_credentials():
+        print("\n💾 检测到当前会话已有凭证")
+        print(f"   Invoker ID: {credential_manager.invoker_id}")
+        print(f"   Session ID: {credential_manager.session_id[:30]}...")
+        use_existing = input("\n是否使用现有凭证? (y/n, 默认 y): ").strip().lower()
+        if use_existing != 'n':
+            invoker_id, session_id = credential_manager.get_credentials()
+            print("✅ 使用现有凭证")
+        else:
+            print("🔄 将重新登录获取新凭证")
 
-    if not result:
-        print("\n❌ 未能获取凭证")
-        print("💡 您可以尝试:")
-        print("   - 重新运行并在登录后刷新页面")
-        print("   - 使用手动模式 (选项 2)")
-        return
+    # 如果没有选择使用现有凭证，则进行半自动登录
+    if not invoker_id or not session_id:
+        manager = SemiAutoLoginManager()
+        result = await manager.semi_auto_login()
 
-    invoker_id, session_id = result
+        if not result:
+            print("\n❌ 未能获取凭证")
+            print("💡 您可以尝试:")
+            print("   - 重新运行并在登录后刷新页面")
+            print("   - 使用手动模式 (选项 2)")
+            return
 
-    print(f"\n✅ 凭证获取成功!")
-    print(f"   Invoker ID: {invoker_id}")
-    print(f"   Session ID: {session_id[:30]}...")
+        invoker_id, session_id = result
+        # 保存到全局凭证管理器
+        credential_manager.set_credentials(invoker_id, session_id)
 
     # 选择运行模式
     print("\n" + "-"*50)
@@ -1078,8 +1145,14 @@ async def semi_auto_mode():
     sim_manager = SimulatorManager()
     try:
         await sim_manager.run_simulator(invoker_id, session_id, max_completions, disable_ssl_verification=True, mode=mode, src_dir=src_dir)
+        print("\n\n✅ 任务执行完成！")
     except KeyboardInterrupt:
         print("\n\n⚠️  收到中断信号，正在停止...")
+
+    print("\n" + "="*50)
+    print("按 Enter 键返回主菜单...")
+    input()
+    print("="*50)
 
 
 async def manual_mode():
@@ -1088,19 +1161,37 @@ async def manual_mode():
     print("✋ 手动模式")
     print("="*50)
 
-    print("\n💡 获取凭证的方法:")
-    print("   1. 打开 https://www.srdcloud.cn/login 并登录")
-    print("   2. 按 F12 打开开发者工具 -> Network 标签")
-    print("   3. 刷新页面或点击任意链接")
-    print("   4. 找到任意请求，查看 Request Headers")
-    print("   5. 找到 userid 和 sessionid 字段\n")
+    # 检查是否已有凭证
+    invoker_id, session_id = None, None
+    if credential_manager.has_credentials():
+        print("\n💾 检测到当前会话已有凭证")
+        print(f"   Invoker ID: {credential_manager.invoker_id}")
+        print(f"   Session ID: {credential_manager.session_id[:30]}...")
+        use_existing = input("\n是否使用现有凭证? (y/n, 默认 y): ").strip().lower()
+        if use_existing != 'n':
+            invoker_id, session_id = credential_manager.get_credentials()
+            print("✅ 使用现有凭证")
+        else:
+            print("🔄 将手动输入新凭证")
 
-    invoker_id = input("请输入 Invoker ID (User ID): ").strip()
-    session_id = input("请输入 Session ID: ").strip()
-
+    # 如果没有选择使用现有凭证，则手动输入
     if not invoker_id or not session_id:
-        print("❌ Invoker ID 和 Session ID 不能为空")
-        return
+        print("\n💡 获取凭证的方法:")
+        print("   1. 打开 https://www.srdcloud.cn/login 并登录")
+        print("   2. 按 F12 打开开发者工具 -> Network 标签")
+        print("   3. 刷新页面或点击任意链接")
+        print("   4. 找到任意请求，查看 Request Headers")
+        print("   5. 找到 userid 和 sessionid 字段\n")
+
+        invoker_id = input("请输入 Invoker ID (User ID): ").strip()
+        session_id = input("请输入 Session ID: ").strip()
+
+        if not invoker_id or not session_id:
+            print("❌ Invoker ID 和 Session ID 不能为空")
+            return
+
+        # 保存到全局凭证管理器
+        credential_manager.set_credentials(invoker_id, session_id)
 
     # 选择运行模式
     print("\n" + "-"*50)
@@ -1142,8 +1233,14 @@ async def manual_mode():
     manager = SimulatorManager()
     try:
         await manager.run_simulator(invoker_id, session_id, max_completions, disable_ssl_verification=True, mode=mode, src_dir=src_dir)
+        print("\n\n✅ 任务执行完成！")
     except KeyboardInterrupt:
         print("\n\n⚠️  收到中断信号，正在停止...")
+
+    print("\n" + "="*50)
+    print("按 Enter 键返回主菜单...")
+    input()
+    print("="*50)
 
 
 async def batch_mode():
@@ -1233,61 +1330,99 @@ async def git_commit_mode():
     print("   需要提供项目ID、仓库ID和文件路径")
     print("   仓库信息将自动获取\n")
 
-    # 选择凭证获取方式
-    print("请选择凭证获取方式:")
-    print("  1. 半自动登录（推荐）")
-    print("  2. 手动输入凭证")
-    cred_choice = input("请输入选项 (1-2, 默认 1): ").strip()
-
     invoker_id = None
     session_id = None
-
     git_params = None
 
-    if cred_choice == "2":
-        # 手动输入
-        invoker_id = input("请输入 Invoker ID (User ID): ").strip()
-        session_id = input("请输入 Session ID: ").strip()
+    # 检查是否已有凭证
+    if credential_manager.has_credentials():
+        print("💾 检测到当前会话已有凭证")
+        print(f"   Invoker ID: {credential_manager.invoker_id}")
+        print(f"   Session ID: {credential_manager.session_id[:30]}...")
+        use_existing = input("\n是否使用现有凭证? (y/n, 默认 y): ").strip().lower()
+        if use_existing != 'n':
+            invoker_id, session_id = credential_manager.get_credentials()
+            print("✅ 使用现有凭证")
+        else:
+            print("🔄 将重新获取凭证")
 
-        if not invoker_id or not session_id:
-            print("❌ Invoker ID 和 Session ID 不能为空")
-            return
-    else:
-        # 半自动登录（Git模式：保持浏览器打开）
-        print("\n正在启动半自动登录...")
-        print("💡 登录后请导航到仓库页面，脚本会自动提取参数\n")
-        manager = SemiAutoLoginManager()
-        result = await manager.semi_auto_login(keep_open=True)
+    # 如果没有选择使用现有凭证，则获取新凭证
+    if not invoker_id or not session_id:
+        # 选择凭证获取方式
+        print("\n请选择凭证获取方式:")
+        print("  1. 半自动登录（推荐）")
+        print("  2. 手动输入凭证")
+        cred_choice = input("请输入选项 (1-2, 默认 1): ").strip()
 
-        if not result:
-            print("\n❌ 未能获取凭证")
-            return
+        if cred_choice == "2":
+            # 手动输入
+            invoker_id = input("请输入 Invoker ID (User ID): ").strip()
+            session_id = input("请输入 Session ID: ").strip()
 
-        invoker_id, session_id, git_params = result
-        print(f"\n✅ 凭证获取成功!")
-        print(f"   Invoker ID: {invoker_id}")
-        print(f"   Session ID: {session_id[:30]}...")
+            if not invoker_id or not session_id:
+                print("❌ Invoker ID 和 Session ID 不能为空")
+                return
+        else:
+            # 半自动登录（Git模式：保持浏览器打开）
+            print("\n正在启动半自动登录...")
+            print("💡 登录后请导航到仓库页面，脚本会自动提取参数\n")
+            manager = SemiAutoLoginManager()
+            result = await manager.semi_auto_login(keep_open=True)
+
+            if not result:
+                print("\n❌ 未能获取凭证")
+                return
+
+            invoker_id, session_id, git_params = result
+            print(f"\n✅ 凭证获取成功!")
+            print(f"   Invoker ID: {invoker_id}")
+            print(f"   Session ID: {session_id[:30]}...")
+
+        # 保存到全局凭证管理器
+        credential_manager.set_credentials(invoker_id, session_id)
+        if git_params:
+            credential_manager.set_git_params(
+                git_params.get('project_id'),
+                git_params.get('repository_id')
+            )
 
     # 输入Git参数
     print("\n" + "-"*50)
     print("请输入 Git 仓库参数:\n")
 
-    # 如果自动提取到了参数，显示并询问是否使用
+    # 优先使用从半自动登录中提取的git_params
+    # 如果没有，则尝试使用credential_manager中保存的参数
+    project_id = None
+    repository_id = None
+
+    # 检查是否有自动检测到的参数或会话中保存的参数
+    has_git_params = False
     if git_params and git_params.get('project_id') and git_params.get('repository_id'):
+        has_git_params = True
         print(f"✅ 已自动检测到:")
         print(f"   项目ID: {git_params['project_id']}")
         print(f"   仓库ID: {git_params['repository_id']}")
-        use_detected = input("\n是否使用检测到的参数? (y/n, 默认 y): ").strip().lower()
+    elif credential_manager.project_id and credential_manager.repository_id:
+        has_git_params = True
+        print(f"💾 使用会话中保存的参数:")
+        print(f"   项目ID: {credential_manager.project_id}")
+        print(f"   仓库ID: {credential_manager.repository_id}")
 
+    if has_git_params:
+        use_detected = input("\n是否使用这些参数? (y/n, 默认 y): ").strip().lower()
         if use_detected != 'n':
-            project_id = git_params['project_id']
-            repository_id = git_params['repository_id']
+            project_id = git_params['project_id'] if git_params else credential_manager.project_id
+            repository_id = git_params['repository_id'] if git_params else credential_manager.repository_id
         else:
             project_id = input("项目ID (Project ID): ").strip()
             repository_id = input("仓库ID (Repository ID): ").strip()
     else:
         project_id = input("项目ID (Project ID): ").strip()
         repository_id = input("仓库ID (Repository ID): ").strip()
+
+    # 保存新输入的参数到会话
+    if project_id and repository_id:
+        credential_manager.set_git_params(project_id, repository_id)
 
     file_path = input("文件路径 (默认: README.md): ").strip()
 
@@ -1340,12 +1475,18 @@ async def git_commit_mode():
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
         simulator.run()
+        print("\n\n✅ Git 提交任务执行完成！")
     except KeyboardInterrupt:
         print("\n\n⚠️  收到中断信号，正在停止...")
     except Exception as e:
         print(f"\n❌ 运行出错: {e}")
         import traceback
         traceback.print_exc()
+
+    print("\n" + "="*50)
+    print("按 Enter 键返回主菜单...")
+    input()
+    print("="*50)
 
 
 def generate_template():
@@ -1418,23 +1559,37 @@ async def main():
 
     while True:
         try:
+            # 显示当前凭证状态
+            if credential_manager.has_credentials():
+                print(f"\n💾 当前会话凭证: Invoker ID = {credential_manager.invoker_id}")
+
             choice = print_menu()
 
             if choice == '1':
                 await assisted_programming_mode()
+                # 任务完成后继续循环，返回主菜单
             elif choice == '2':
                 await git_commit_mode()
-                break
+                # 任务完成后继续循环，返回主菜单
             elif choice == '3':
                 print("\n👋 再见!")
                 sys.exit(0)
             else:
                 print("❌ 无效选项，请重新选择\n")
+        except KeyboardInterrupt:
+            print("\n\n⚠️  检测到 Ctrl+C")
+            confirm = input("是否退出程序? (y/n): ").strip().lower()
+            if confirm == 'y':
+                print("\n👋 再见!")
+                sys.exit(0)
+            else:
+                print("\n继续运行...\n")
         except Exception as e:
             print(f"\n❌ 发生错误: {e}")
             import traceback
             traceback.print_exc()
-            break
+            print("\n按任意键返回主菜单...")
+            input()
 
 
 if __name__ == "__main__":
